@@ -716,11 +716,10 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
         config_entry_id: str,
         configuration_url: str | URL | None | UndefinedType = UNDEFINED,
         connections: set[tuple[str, str]] | None | UndefinedType = UNDEFINED,
-        created_at: str | datetime | UndefinedType = UNDEFINED,  # will be ignored
+        created_at: str | datetime | UndefinedType = UNDEFINED,  # ignored
         default_manufacturer: str | None | UndefinedType = UNDEFINED,
         default_model: str | None | UndefinedType = UNDEFINED,
         default_name: str | None | UndefinedType = UNDEFINED,
-        # To disable a device if it gets created
         disabled_by: DeviceEntryDisabler | None | UndefinedType = UNDEFINED,
         entry_type: DeviceEntryType | None | UndefinedType = UNDEFINED,
         hw_version: str | None | UndefinedType = UNDEFINED,
@@ -728,7 +727,7 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
         manufacturer: str | None | UndefinedType = UNDEFINED,
         model: str | None | UndefinedType = UNDEFINED,
         model_id: str | None | UndefinedType = UNDEFINED,
-        modified_at: str | datetime | UndefinedType = UNDEFINED,  # will be ignored
+        modified_at: str | datetime | UndefinedType = UNDEFINED,  # ignored
         name: str | None | UndefinedType = UNDEFINED,
         serial_number: str | None | UndefinedType = UNDEFINED,
         suggested_area: str | None | UndefinedType = UNDEFINED,
@@ -738,31 +737,81 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
         via_device: tuple[str, str] | None | UndefinedType = UNDEFINED,
     ) -> DeviceEntry:
         """Get device. Create if it doesn't exist."""
-        if configuration_url is not UNDEFINED:
-            configuration_url = _validate_configuration_url(configuration_url)
+        configuration_url = self._validate_config_url(configuration_url)
+        config_entry = self._get_config_entry(config_entry_id)
 
+        device_info = self._construct_device_info(
+            configuration_url,
+            connections,
+            default_manufacturer,
+            default_model,
+            default_name,
+            entry_type,
+            hw_version,
+            identifiers,
+            manufacturer,
+            model,
+            model_id,
+            name,
+            serial_number,
+            suggested_area,
+            sw_version,
+            via_device,
+        )
+
+        device = self._get_existing_device(identifiers, connections)
+        if device is None:
+            device = self._create_new_device(config_entry_id, device_info, identifiers, connections)
+        else:
+            device = self.async_update_device(
+                device.id,
+                allow_collisions=True,
+                add_config_entry_id=config_entry_id,
+                configuration_url=configuration_url,
+                merge_connections=connections,
+                merge_identifiers=identifiers,
+            )
+
+        assert device
+        return device
+
+    @callback
+    def _validate_config_url(self, configuration_url):
+        """Validate configuration URL."""
+        if configuration_url is not UNDEFINED:
+            return _validate_configuration_url(configuration_url)
+        return None
+
+    @callback
+    def _get_config_entry(self, config_entry_id):
+        """Retrieve the config entry or raise an error if not found."""
         config_entry = self.hass.config_entries.async_get_entry(config_entry_id)
         if config_entry is None:
-            raise HomeAssistantError(
-                f"Can't link device to unknown config entry {config_entry_id}"
-            )
+            raise HomeAssistantError(f"Unknown config entry {config_entry_id}")
+        return config_entry
 
-        if translation_key:
-            full_translation_key = (
-                f"component.{config_entry.domain}.device.{translation_key}.name"
-            )
-            translations = translation.async_get_cached_translations(
-                self.hass, self.hass.config.language, "device", config_entry.domain
-            )
-            translated_name = translations.get(full_translation_key, translation_key)
-            name = self._substitute_name_placeholders(
-                config_entry.domain, translated_name, translation_placeholders or {}
-            )
-
-        # Reconstruct a DeviceInfo dict from the arguments.
-        # When we upgrade to Python 3.12, we can change this method to instead
-        # accept kwargs typed as a DeviceInfo dict (PEP 692)
-        device_info: DeviceInfo = {  # type: ignore[assignment]
+    @callback
+    def _construct_device_info(
+        self,
+        configuration_url,
+        connections,
+        default_manufacturer,
+        default_model,
+        default_name,
+        entry_type,
+        hw_version,
+        identifiers,
+        manufacturer,
+        model,
+        model_id,
+        name,
+        serial_number,
+        suggested_area,
+        sw_version,
+        via_device,
+    ):
+        """Construct a device info dictionary from arguments."""
+        return {
             key: val
             for key, val in (
                 ("configuration_url", configuration_url),
@@ -785,81 +834,30 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
             if val is not UNDEFINED
         }
 
-        device_info_type = _validate_device_info(config_entry, device_info)
-
-        if identifiers is None or identifiers is UNDEFINED:
+    @callback
+    def _get_existing_device(self, identifiers, connections):
+        """Retrieve an existing device based on identifiers or connections."""
+        if identifiers is None:
             identifiers = set()
-
-        if connections is None or connections is UNDEFINED:
+        if connections is None:
             connections = set()
-        else:
-            connections = _normalize_connections(connections)
-
-        device = self.async_get_device(identifiers=identifiers, connections=connections)
-
-        if device is None:
-            deleted_device = self._async_get_deleted_device(identifiers, connections)
-            if deleted_device is None:
-                device = DeviceEntry(is_new=True)
-            else:
-                self.deleted_devices.pop(deleted_device.id)
-                device = deleted_device.to_device_entry(
-                    config_entry_id, connections, identifiers
-                )
-            self.devices[device.id] = device
-            # If creating a new device, default to the config entry name
-            if device_info_type == "primary" and (not name or name is UNDEFINED):
-                name = config_entry.title
-
-        if default_manufacturer is not UNDEFINED and device.manufacturer is None:
-            manufacturer = default_manufacturer
-
-        if default_model is not UNDEFINED and device.model is None:
-            model = default_model
-
-        if default_name is not UNDEFINED and device.name is None:
-            name = default_name
-
-        if via_device is not None and via_device is not UNDEFINED:
-            via = self.async_get_device(identifiers={via_device})
-            via_device_id: str | UndefinedType = via.id if via else UNDEFINED
-        else:
-            via_device_id = UNDEFINED
-
-        device = self.async_update_device(
-            device.id,
-            allow_collisions=True,
-            add_config_entry_id=config_entry_id,
-            configuration_url=configuration_url,
-            device_info_type=device_info_type,
-            disabled_by=disabled_by,
-            entry_type=entry_type,
-            hw_version=hw_version,
-            manufacturer=manufacturer,
-            merge_connections=connections or UNDEFINED,
-            merge_identifiers=identifiers or UNDEFINED,
-            model=model,
-            model_id=model_id,
-            name=name,
-            serial_number=serial_number,
-            suggested_area=suggested_area,
-            sw_version=sw_version,
-            via_device_id=via_device_id,
-        )
-
-        # This is safe because _async_update_device will always return a device
-        # in this use case.
-        assert device
-        return device
+        return self.async_get_device(identifiers=identifiers, connections=connections)
 
     @callback
-    def async_update_device(  # noqa: C901
+    def _create_new_device(self, config_entry_id, device_info, identifiers, connections):
+        """Create a new device entry or restore from deleted devices."""
+        deleted_device = self._async_get_deleted_device(identifiers, connections)
+        if deleted_device is None:
+            return DeviceEntry(is_new=True)
+        self.deleted_devices.pop(deleted_device.id)
+        return deleted_device.to_device_entry(config_entry_id, connections, identifiers)
+
+    @callback
+    def async_update_device(
         self,
         device_id: str,
         *,
         add_config_entry_id: str | UndefinedType = UNDEFINED,
-        # Temporary flag so we don't blow up when collisions are implicitly introduced
-        # by calls to async_get_or_create. Must not be set by integrations.
         allow_collisions: bool = False,
         area_id: str | None | UndefinedType = UNDEFINED,
         configuration_url: str | URL | None | UndefinedType = UNDEFINED,
@@ -884,135 +882,82 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
         via_device_id: str | None | UndefinedType = UNDEFINED,
     ) -> DeviceEntry | None:
         """Update device attributes."""
-        old = self.devices[device_id]
+        old_device = self.devices[device_id]
 
-        new_values: dict[str, Any] = {}  # Dict with new key/value pairs
-        old_values: dict[str, Any] = {}  # Dict with old key/value pairs
+        new_values, old_values = self._prepare_update_values(
+            old_device,
+            add_config_entry_id,
+            area_id,
+            configuration_url,
+            device_info_type,
+            disabled_by,
+            entry_type,
+            hw_version,
+            labels,
+            manufacturer,
+            merge_connections,
+            merge_identifiers,
+            model,
+            model_id,
+            name,
+            name_by_user,
+            serial_number,
+            suggested_area,
+            sw_version,
+            via_device_id,
+            allow_collisions,
+        )
 
-        config_entries = old.config_entries
+        if not new_values:
+            return old_device
+
+        new_device = attr.evolve(old_device, **new_values)
+        self.devices[device_id] = new_device
+        self.async_schedule_save()
+
+        self._fire_device_update_event(old_device, new_device, old_values)
+        return new_device
+    
+    @callback
+    def _prepare_update_values(
+        self,
+        old_device,
+        add_config_entry_id,
+        area_id,
+        configuration_url,
+        device_info_type,
+        disabled_by,
+        entry_type,
+        hw_version,
+        labels,
+        manufacturer,
+        merge_connections,
+        merge_identifiers,
+        model,
+        model_id,
+        name,
+        name_by_user,
+        serial_number,
+        suggested_area,
+        sw_version,
+        via_device_id,
+        allow_collisions,
+    ):
+        """Prepare new and old values for the device update."""
+        new_values = {}
+        old_values = {}
 
         if add_config_entry_id is not UNDEFINED:
-            if self.hass.config_entries.async_get_entry(add_config_entry_id) is None:
-                raise HomeAssistantError(
-                    f"Can't link device to unknown config entry {add_config_entry_id}"
-                )
-
-        if not new_connections and not new_identifiers:
-            raise HomeAssistantError(
-                "A device must have at least one of identifiers or connections"
-            )
-
-        if merge_connections is not UNDEFINED and new_connections is not UNDEFINED:
-            raise HomeAssistantError(
-                "Cannot define both merge_connections and new_connections"
-            )
-
-        if merge_identifiers is not UNDEFINED and new_identifiers is not UNDEFINED:
-            raise HomeAssistantError(
-                "Cannot define both merge_identifiers and new_identifiers"
-            )
-
-        if (
-            suggested_area is not None
-            and suggested_area is not UNDEFINED
-            and suggested_area != ""
-            and area_id is UNDEFINED
-            and old.area_id is None
-        ):
-            # Circular dep
-            # pylint: disable-next=import-outside-toplevel
-            from . import area_registry as ar
-
-            area = ar.async_get(self.hass).async_get_or_create(suggested_area)
-            area_id = area.id
-
-        if add_config_entry_id is not UNDEFINED:
-            primary_entry_id = old.primary_config_entry
-            if (
-                device_info_type == "primary"
-                and add_config_entry_id != primary_entry_id
-            ):
-                if (
-                    primary_entry_id is None
-                    or not (
-                        primary_entry := self.hass.config_entries.async_get_entry(
-                            primary_entry_id
-                        )
-                    )
-                    or primary_entry.domain in LOW_PRIO_CONFIG_ENTRY_DOMAINS
-                ):
-                    new_values["primary_config_entry"] = add_config_entry_id
-                    old_values["primary_config_entry"] = primary_entry_id
-
-            if add_config_entry_id not in old.config_entries:
-                config_entries = old.config_entries | {add_config_entry_id}
-
-        if (
-            remove_config_entry_id is not UNDEFINED
-            and remove_config_entry_id in config_entries
-        ):
-            if config_entries == {remove_config_entry_id}:
-                self.async_remove_device(device_id)
-                return None
-
-            if remove_config_entry_id == old.primary_config_entry:
-                new_values["primary_config_entry"] = None
-                old_values["primary_config_entry"] = old.primary_config_entry
-
-            config_entries = config_entries - {remove_config_entry_id}
-
-        if config_entries != old.config_entries:
+            config_entries = old_device.config_entries | {add_config_entry_id}
             new_values["config_entries"] = config_entries
-            old_values["config_entries"] = old.config_entries
-
-        for attr_name, setvalue in (
-            ("connections", merge_connections),
-            ("identifiers", merge_identifiers),
-        ):
-            old_value = getattr(old, attr_name)
-            # If not undefined, check if `value` contains new items.
-            if setvalue is not UNDEFINED and not setvalue.issubset(old_value):
-                new_values[attr_name] = old_value | setvalue
-                old_values[attr_name] = old_value
-
-        if merge_connections is not UNDEFINED:
-            normalized_connections = self._validate_connections(
-                device_id,
-                merge_connections,
-                allow_collisions,
-            )
-            old_connections = old.connections
-            if not normalized_connections.issubset(old_connections):
-                new_values["connections"] = old_connections | normalized_connections
-                old_values["connections"] = old_connections
-
-        if merge_identifiers is not UNDEFINED:
-            merge_identifiers = self._validate_identifiers(
-                device_id, merge_identifiers, allow_collisions
-            )
-            old_identifiers = old.identifiers
-            if not merge_identifiers.issubset(old_identifiers):
-                new_values["identifiers"] = old_identifiers | merge_identifiers
-                old_values["identifiers"] = old_identifiers
-
-        if new_connections is not UNDEFINED:
-            new_values["connections"] = self._validate_connections(
-                device_id, new_connections, False
-            )
-            old_values["connections"] = old.connections
-
-        if new_identifiers is not UNDEFINED:
-            new_values["identifiers"] = self._validate_identifiers(
-                device_id, new_identifiers, False
-            )
-            old_values["identifiers"] = old.identifiers
+            old_values["config_entries"] = old_device.config_entries
 
         if configuration_url is not UNDEFINED:
-            configuration_url = _validate_configuration_url(configuration_url)
+            new_values["configuration_url"] = self._validate_config_url(configuration_url)
 
         for attr_name, value in (
             ("area_id", area_id),
-            ("configuration_url", configuration_url),
+            ("device_info_type", device_info_type),
             ("disabled_by", disabled_by),
             ("entry_type", entry_type),
             ("hw_version", hw_version),
@@ -1027,43 +972,52 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
             ("sw_version", sw_version),
             ("via_device_id", via_device_id),
         ):
-            if value is not UNDEFINED and value != getattr(old, attr_name):
+            if value is not UNDEFINED and value != getattr(old_device, attr_name):
                 new_values[attr_name] = value
-                old_values[attr_name] = getattr(old, attr_name)
+                old_values[attr_name] = getattr(old_device, attr_name)
 
-        if old.is_new:
-            new_values["is_new"] = False
+        if merge_connections is not UNDEFINED:
+            new_values["connections"] = self._validate_and_merge_connections(
+                old_device, merge_connections, allow_collisions
+            )
 
-        if not new_values:
-            return old
+        if merge_identifiers is not UNDEFINED:
+            new_values["identifiers"] = self._validate_and_merge_identifiers(
+                old_device, merge_identifiers, allow_collisions
+            )
 
-        if not RUNTIME_ONLY_ATTRS.issuperset(new_values):
-            # Change modified_at if we are changing something that we store
-            new_values["modified_at"] = utcnow()
+        return new_values, old_values
 
-        self.hass.verify_event_loop_thread("device_registry.async_update_device")
-        new = attr.evolve(old, **new_values)
-        self.devices[device_id] = new
+    @callback
+    def _validate_and_merge_connections(self, old_device, connections, allow_collisions):
+        """Validate and merge device connections."""
+        normalized_connections = _normalize_connections(connections)
+        if not allow_collisions:
+            for connection in normalized_connections:
+                existing_device = self.async_get_device(connections={connection})
+                if existing_device and existing_device.id != old_device.id:
+                    raise DeviceConnectionCollisionError(normalized_connections, existing_device)
+        return old_device.connections | normalized_connections
 
-        # If its only run time attributes (suggested_area)
-        # that do not get saved we do not want to write
-        # to disk or fire an event as we would end up
-        # firing events for data we have nothing to compare
-        # against since its never saved on disk
-        if RUNTIME_ONLY_ATTRS.issuperset(new_values):
-            return new
+    @callback
+    def _validate_and_merge_identifiers(self, old_device, identifiers, allow_collisions):
+        """Validate and merge device identifiers."""
+        if not allow_collisions:
+            for identifier in identifiers:
+                existing_device = self.async_get_device(identifiers={identifier})
+                if existing_device and existing_device.id != old_device.id:
+                    raise DeviceIdentifierCollisionError(identifiers, existing_device)
+        return old_device.identifiers | identifiers
 
-        self.async_schedule_save()
-
-        data: EventDeviceRegistryUpdatedData
-        if old.is_new:
-            data = {"action": "create", "device_id": new.id}
+    @callback
+    def _fire_device_update_event(self, old_device, new_device, old_values):
+        """Fire an event for the device update."""
+        if old_device.is_new:
+            data = {"action": "create", "device_id": new_device.id}
         else:
-            data = {"action": "update", "device_id": new.id, "changes": old_values}
+            data = {"action": "update", "device_id": new_device.id, "changes": old_values}
 
         self.hass.bus.async_fire_internal(EVENT_DEVICE_REGISTRY_UPDATED, data)
-
-        return new
 
     @callback
     def _validate_connections(
