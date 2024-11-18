@@ -827,33 +827,114 @@ class EntityRegistry(BaseRegistry):
         translation_key: str | None | UndefinedType = UNDEFINED,
         unit_of_measurement: str | None | UndefinedType = UNDEFINED,
     ) -> RegistryEntry:
-        """Get entity. Create if it doesn't exist."""
-        config_entry_id: str | None | UndefinedType = UNDEFINED
-        if not config_entry:
-            config_entry_id = None
-        elif config_entry is not UNDEFINED:
-            config_entry_id = config_entry.entry_id
+        """Get or create an entity in the registry."""
+        # Resolve config entry ID
+        config_entry_id = self._resolve_config_entry_id(config_entry)
 
-        supported_features = supported_features or 0
-
+        # Check if the entity already exists
         entity_id = self.async_get_entity_id(domain, platform, unique_id)
-
         if entity_id:
-            return self.async_update_entity(
+            return self._update_existing_entity(
                 entity_id,
-                capabilities=capabilities,
-                config_entry_id=config_entry_id,
-                device_id=device_id,
-                entity_category=entity_category,
-                has_entity_name=has_entity_name,
-                original_device_class=original_device_class,
-                original_icon=original_icon,
-                original_name=original_name,
-                supported_features=supported_features,
-                translation_key=translation_key,
-                unit_of_measurement=unit_of_measurement,
+                capabilities,
+                config_entry_id,
+                device_id,
+                entity_category,
+                has_entity_name,
+                original_device_class,
+                original_icon,
+                original_name,
+                supported_features,
+                translation_key,
+                unit_of_measurement,
             )
 
+        # Validate the new entity's properties
+        self._validate_new_entity(
+            domain, platform, disabled_by, entity_category, hidden_by, unique_id
+        )
+
+        # Prepare entity ID and metadata for new entity
+        entity_registry_id, created_at = self._prepare_entity_metadata(
+            domain, platform, unique_id
+        )
+        entity_id = self._generate_entity_id(domain, platform, unique_id, suggested_object_id, known_object_ids)
+
+        # Determine if the entity should be disabled
+        disabled_by = self._resolve_disabled_by(disabled_by, config_entry)
+
+        # Generate initial options
+        initial_options = get_initial_options() if get_initial_options else None
+
+        # Create and register the new entity
+        entry = self._register_new_entity(
+            domain,
+            platform,
+            unique_id,
+            entity_id,
+            entity_registry_id,
+            created_at,
+            capabilities,
+            config_entry_id,
+            device_id,
+            entity_category,
+            has_entity_name,
+            original_device_class,
+            original_icon,
+            original_name,
+            supported_features,
+            translation_key,
+            unit_of_measurement,
+            disabled_by,
+            hidden_by,
+            initial_options,
+        )
+
+        return entry
+    
+    # Helper Functions
+    def _resolve_config_entry_id(self, config_entry):
+        """Resolve the config entry ID."""
+        if not config_entry:
+            return None
+        if config_entry is not UNDEFINED:
+            return config_entry.entry_id
+        return UNDEFINED
+
+    def _update_existing_entity(
+        self,
+        entity_id,
+        capabilities,
+        config_entry_id,
+        device_id,
+        entity_category,
+        has_entity_name,
+        original_device_class,
+        original_icon,
+        original_name,
+        supported_features,
+        translation_key,
+        unit_of_measurement,
+    ):
+        """Update an existing entity's properties."""
+        return self.async_update_entity(
+            entity_id,
+            capabilities=capabilities,
+            config_entry_id=config_entry_id,
+            device_id=device_id,
+            entity_category=entity_category,
+            has_entity_name=has_entity_name,
+            original_device_class=original_device_class,
+            original_icon=original_icon,
+            original_name=original_name,
+            supported_features=supported_features,
+            translation_key=translation_key,
+            unit_of_measurement=unit_of_measurement,
+        )
+
+
+    def _validate_new_entity(self, domain, platform, disabled_by, entity_category, hidden_by, unique_id):
+        """Validate the properties of a new entity."""
         self.hass.verify_event_loop_thread("entity_registry.async_get_or_create")
         _validate_item(
             self.hass,
@@ -865,54 +946,77 @@ class EntityRegistry(BaseRegistry):
             unique_id=unique_id,
         )
 
-        entity_registry_id: str | None = None
+    def _prepare_entity_metadata(self, domain, platform, unique_id):
+        """Prepare metadata for a new entity."""
         created_at = utcnow()
         deleted_entity = self.deleted_entities.pop((domain, platform, unique_id), None)
-        if deleted_entity is not None:
-            # Restore id
-            entity_registry_id = deleted_entity.id
-            created_at = deleted_entity.created_at
+        entity_registry_id = deleted_entity.id if deleted_entity else None
+        created_at = deleted_entity.created_at if deleted_entity else created_at
+        return entity_registry_id, created_at
 
-        entity_id = self.async_generate_entity_id(
+    def _generate_entity_id(self, domain, platform, unique_id, suggested_object_id, known_object_ids):
+        """Generate a unique entity ID."""
+        return self.async_generate_entity_id(
             domain,
             suggested_object_id or f"{platform}_{unique_id}",
             known_object_ids,
         )
 
+    def _resolve_disabled_by(self, disabled_by, config_entry):
+        """Determine if an entity should be disabled."""
         if (
             disabled_by is None
             and config_entry
             and config_entry is not UNDEFINED
             and config_entry.pref_disable_new_entities
         ):
-            disabled_by = RegistryEntryDisabler.INTEGRATION
+            return RegistryEntryDisabler.INTEGRATION
+        return disabled_by
 
-        def none_if_undefined[_T](value: _T | UndefinedType) -> _T | None:
-            """Return None if value is UNDEFINED, otherwise return value."""
-            return None if value is UNDEFINED else value
-
-        initial_options = get_initial_options() if get_initial_options else None
-
+    def _register_new_entity(
+        self,
+        domain,
+        platform,
+        unique_id,
+        entity_id,
+        entity_registry_id,
+        created_at,
+        capabilities,
+        config_entry_id,
+        device_id,
+        entity_category,
+        has_entity_name,
+        original_device_class,
+        original_icon,
+        original_name,
+        supported_features,
+        translation_key,
+        unit_of_measurement,
+        disabled_by,
+        hidden_by,
+        initial_options,
+    ):
+        """Create and register a new entity."""
         entry = RegistryEntry(
-            capabilities=none_if_undefined(capabilities),
-            config_entry_id=none_if_undefined(config_entry_id),
+            capabilities=capabilities,
+            config_entry_id=config_entry_id,
             created_at=created_at,
-            device_id=none_if_undefined(device_id),
+            device_id=device_id,
             disabled_by=disabled_by,
-            entity_category=none_if_undefined(entity_category),
+            entity_category=entity_category,
             entity_id=entity_id,
             hidden_by=hidden_by,
-            has_entity_name=none_if_undefined(has_entity_name) or False,
+            has_entity_name=has_entity_name or False,
             id=entity_registry_id,
             options=initial_options,
-            original_device_class=none_if_undefined(original_device_class),
-            original_icon=none_if_undefined(original_icon),
-            original_name=none_if_undefined(original_name),
+            original_device_class=original_device_class,
+            original_icon=original_icon,
+            original_name=original_name,
             platform=platform,
-            supported_features=none_if_undefined(supported_features) or 0,
-            translation_key=none_if_undefined(translation_key),
+            supported_features=supported_features or 0,
+            translation_key=translation_key,
             unique_id=unique_id,
-            unit_of_measurement=none_if_undefined(unit_of_measurement),
+            unit_of_measurement=unit_of_measurement,
         )
         self.entities[entity_id] = entry
         _LOGGER.info("Registered new %s.%s entity: %s", domain, platform, entity_id)
@@ -1053,49 +1157,70 @@ class EntityRegistry(BaseRegistry):
         """Private facing update properties method."""
         old = self.entities[entity_id]
 
-        new_values: dict[str, Any] = {}  # Dict with new key/value pairs
-        old_values: dict[str, Any] = {}  # Dict with old key/value pairs
+        # Step 1: Compute changes between old and new values
+        new_values, old_values = self._compute_changes(
+            old,
+            aliases=aliases,
+            area_id=area_id,
+            categories=categories,
+            capabilities=capabilities,
+            config_entry_id=config_entry_id,
+            device_class=device_class,
+            device_id=device_id,
+            disabled_by=disabled_by,
+            entity_category=entity_category,
+            hidden_by=hidden_by,
+            icon=icon,
+            has_entity_name=has_entity_name,
+            labels=labels,
+            name=name,
+            options=options,
+            original_device_class=original_device_class,
+            original_icon=original_icon,
+            original_name=original_name,
+            platform=platform,
+            supported_features=supported_features,
+            translation_key=translation_key,
+            unit_of_measurement=unit_of_measurement,
+        )
 
-        for attr_name, value in (
-            ("aliases", aliases),
-            ("area_id", area_id),
-            ("categories", categories),
-            ("capabilities", capabilities),
-            ("config_entry_id", config_entry_id),
-            ("device_class", device_class),
-            ("device_id", device_id),
-            ("disabled_by", disabled_by),
-            ("entity_category", entity_category),
-            ("hidden_by", hidden_by),
-            ("icon", icon),
-            ("has_entity_name", has_entity_name),
-            ("labels", labels),
-            ("name", name),
-            ("options", options),
-            ("original_device_class", original_device_class),
-            ("original_icon", original_icon),
-            ("original_name", original_name),
-            ("platform", platform),
-            ("supported_features", supported_features),
-            ("translation_key", translation_key),
-            ("unit_of_measurement", unit_of_measurement),
-        ):
+        # Step 2: Handle special cases like new entity ID or unique ID
+        self._handle_special_cases(entity_id, old, new_entity_id, new_unique_id, new_values, old_values)
+
+        # If no changes detected, return the original entry
+        if not new_values:
+            return old
+
+        # Step 3: Apply and persist the changes
+        return self._apply_changes(entity_id, old, new_values, old_values)
+
+    def _compute_changes(
+        self,
+        old: RegistryEntry,
+        **kwargs: dict,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Compute changes between old and new entity values."""
+        new_values = {}
+        old_values = {}
+
+        for attr_name, value in kwargs.items():
             if value is not UNDEFINED and value != getattr(old, attr_name):
                 new_values[attr_name] = value
                 old_values[attr_name] = getattr(old, attr_name)
 
-        # Only validate if data has changed
-        if new_values or new_unique_id is not UNDEFINED:
-            _validate_item(
-                self.hass,
-                old.domain,
-                old.platform,
-                disabled_by=disabled_by,
-                entity_category=entity_category,
-                hidden_by=hidden_by,
-                unique_id=new_unique_id,
-            )
+        return new_values, old_values
 
+    def _handle_special_cases(
+        self,
+        entity_id: str,
+        old: RegistryEntry,
+        new_entity_id: str | UndefinedType,
+        new_unique_id: str | UndefinedType,
+        new_values: dict[str, Any],
+        old_values: dict[str, Any],
+    ) -> None:
+        """Handle special cases for entity ID and unique ID updates."""
+        # Handle new entity ID
         if new_entity_id is not UNDEFINED and new_entity_id != old.entity_id:
             if not self._entity_id_available(new_entity_id, None):
                 raise ValueError("Entity with this ID is already registered")
@@ -1107,33 +1232,41 @@ class EntityRegistry(BaseRegistry):
                 raise ValueError("New entity ID should be same domain")
 
             self.entities.pop(entity_id)
-            entity_id = new_values["entity_id"] = new_entity_id
+            new_values["entity_id"] = new_entity_id
             old_values["entity_id"] = old.entity_id
 
+        # Handle new unique ID
         if new_unique_id is not UNDEFINED:
             conflict_entity_id = self.async_get_entity_id(
                 old.domain, old.platform, new_unique_id
             )
             if conflict_entity_id:
                 raise ValueError(
-                    f"Unique id '{new_unique_id}' is already in use by "
-                    f"'{conflict_entity_id}'"
+                    f"Unique id '{new_unique_id}' is already in use by '{conflict_entity_id}'"
                 )
             new_values["unique_id"] = new_unique_id
             old_values["unique_id"] = old.unique_id
             new_values["previous_unique_id"] = old.unique_id
 
-        if not new_values:
-            return old
-
+    def _apply_changes(
+        self,
+        entity_id: str,
+        old: RegistryEntry,
+        new_values: dict[str, Any],
+        old_values: dict[str, Any],
+    ) -> RegistryEntry:
+        """Apply and persist changes to the registry entry."""
         new_values["modified_at"] = utcnow()
 
         self.hass.verify_event_loop_thread("entity_registry.async_update_entity")
 
+        # Update the registry entry
         new = self.entities[entity_id] = attr.evolve(old, **new_values)
 
+        # Persist the changes
         self.async_schedule_save()
 
+        # Fire the update event
         data: _EventEntityRegistryUpdatedData_Update = {
             "action": "update",
             "entity_id": entity_id,
