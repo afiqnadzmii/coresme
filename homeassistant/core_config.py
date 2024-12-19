@@ -159,7 +159,31 @@ def _filter_bad_internal_external_urls(conf: dict) -> dict:
 
 
 # Schema for all packages element
-_PACKAGES_CONFIG_SCHEMA = vol.Schema({cv.string: vol.Any(dict, list)})
+_PACKAGES_CONFIG_SCHEMA = vol.Schema(
+    {
+        # Each package must be a dictionary
+        cv.string: vol.Schema(
+            {
+                # Add stricter rules for the contents of the dictionary
+                vol.Optional("name"): cv.string,  # Package name as a string
+                vol.Optional("description"): cv.string,  # Description of the package
+                vol.Optional("dependencies"): vol.All(
+                    cv.ensure_list, [cv.string]
+                ),  # List of dependency strings
+                vol.Optional("config"): vol.Schema(  # Config subfield
+                    {
+                        vol.Required("option"): cv.string,  # Required "option" key
+                        vol.Optional("value"): vol.Any(
+                            int, str, bool
+                        ),  # Allowed types for "value"
+                    },
+                    extra=vol.ALLOW_EXTRA,  # Allow other optional fields
+                ),
+            },
+            extra=vol.REMOVE_EXTRA,  # Remove unknown fields
+        )
+    }
+)
 
 # Schema for individual package definition
 _PACKAGE_DEFINITION_SCHEMA = vol.Schema({cv.string: vol.Any(dict, list, None)})

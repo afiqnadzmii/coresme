@@ -214,6 +214,13 @@ async def async_hass_config_yaml(hass: HomeAssistant) -> dict:
     """
     secrets = Secrets(Path(hass.config.config_dir))
 
+    # List of deprecated configuration (key: reason or replacement)
+    deprecated_configurations = {
+        "old_integration": "This integration is deprecated. Use 'new_integration' instead.",
+        "legacy_option": "The option 'legacy_option' is no longer supported.",
+        "deprecated_key": "This key is deprecated and will be removed in future versions.",
+    }
+
     # Not using async_add_executor_job because this is an internal method.
     try:
         config = await hass.loop.run_in_executor(
@@ -232,6 +239,24 @@ async def async_hass_config_yaml(hass: HomeAssistant) -> dict:
         if base_exc.problem_mark and base_exc.problem_mark.name:
             base_exc.problem_mark.name = _relpath(hass, base_exc.problem_mark.name)
         raise
+
+    # Check for deprecated configurations
+    for key, value in config.items():
+        if key in deprecated_configurations:
+            _LOGGER.warning(
+                "Deprecated configuration detected: '%s'. %s",
+                key,
+                deprecated_configurations[key],
+            )
+        if isinstance(value, dict):
+            for sub_key, sub_value in value.items():
+                if sub_key in deprecated_configurations:
+                    _LOGGER.warning(
+                        "Deprecated configuration detected: '%s' in '%s'. %s",
+                        sub_key,
+                        key,
+                        deprecated_configurations[sub_key],
+                    )
 
     invalid_domains = []
     for key in config:
@@ -518,10 +543,10 @@ def humanize_error(
     link: str | None,
     max_sub_error_length: int = MAX_VALIDATION_ERROR_ITEM_LENGTH,
 ) -> str:
-    """Provide a more helpful + complete validation error message.
+    """Provide a more helpful and complete validation error message.
 
-    This is a modified version of voluptuous.error.Invalid.__str__,
-    the modifications make some minor changes to the formatting.
+    This version ensures schema-related terms are properly defined and
+    generates more user-friendly output for invalid configurations.
     """
     if isinstance(validation_error, vol.MultipleInvalid):
         return "\n".join(
@@ -532,8 +557,45 @@ def humanize_error(
                 for sub_error in validation_error.errors
             )
         )
-    return stringify_invalid(
-        hass, validation_error, domain, config, link, max_sub_error_length
+
+    # Default message prefix and suffix
+    message_prefix = f"Invalid config for '{domain}'"
+    message_suffix = ""
+
+    # Append link to docs if available
+    if domain != HOMEASSISTANT_DOMAIN and link:
+        message_suffix = f", please check the docs at {link}"
+
+    # If there is annotation info, include file and line number in the message
+    if annotation := find_annotation(config, validation_error.path):
+        message_prefix += f" at {_relpath(hass, annotation[0])}, line {annotation[1]}"
+
+    # Construct a detailed path representation
+    path = "->".join(str(p) for p in validation_error.path)
+
+    # Improve user feedback for common validation errors
+    if validation_error.error_message == "extra keys not allowed":
+        return (
+            f"{message_prefix}: '{validation_error.path[-1]}' is an invalid option for '{domain}', "
+            f"check: {path}{message_suffix}"
+        )
+    if validation_error.error_message == "required key not provided":
+        return (
+            f"{message_prefix}: required key '{validation_error.path[-1]}' not provided"
+            f"{message_suffix}"
+        )
+
+    # Generate a more user-friendly representation of the offending item
+    offending_item_summary = repr(_get_by_path(config, validation_error.path))
+    if len(offending_item_summary) > max_sub_error_length:
+        offending_item_summary = (
+            f"{offending_item_summary[: max_sub_error_length - 3]}..."
+        )
+
+    # Catch-all case for less common error messages
+    return (
+        f"{message_prefix}: {validation_error.error_message or repr(validation_error)} "
+        f"'{path}', got {offending_item_summary}{message_suffix}"
     )
 
 
