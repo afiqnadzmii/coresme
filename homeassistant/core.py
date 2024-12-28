@@ -17,6 +17,9 @@ from collections.abc import (
     Mapping,
     ValuesView,
 )
+
+from datetime import datetime
+
 import concurrent.futures
 from dataclasses import dataclass
 import datetime
@@ -39,6 +42,8 @@ from typing import (
     cast,
     overload,
 )
+
+import platform #to capture platform metadata
 
 from propcache import cached_property, under_cached_property
 from typing_extensions import TypeVar
@@ -546,7 +551,14 @@ class HomeAssistant:
 
         This method is a coroutine.
         """
+
+        # Capture metadata here
+        timestamp = datetime.datetime.now()
+        start_time = time.time()
+        system_platform = platform.system() # captures the platform of the system (ex: Windows, Linux, etc)
+
         _LOGGER.info("Starting Home Assistant")
+        _LOGGER.info(f"Starting Home Assistant at {timestamp} on {system_platform}")
 
         self.set_state(CoreState.starting)
         self.bus.async_fire_internal(EVENT_CORE_CONFIG_UPDATE)
@@ -581,10 +593,18 @@ class HomeAssistant:
                 "Its state may be inconsistent"
             )
             return
+        
+        # Calculation of the duration of the startup process
+        duration = time.time() - start_time
+        _LOGGER.info(f"Home Assistant started successfully in {duration:.2f} seconds")
 
         self.set_state(CoreState.running)
         self.bus.async_fire_internal(EVENT_CORE_CONFIG_UPDATE)
         self.bus.async_fire_internal(EVENT_HOMEASSISTANT_STARTED)
+
+        # Log metadata after successful start:
+        _LOGGER.info(f"Home Assistant started at {timestamp} in {system_platform} with a duration of {duration:.2f} seconds")
+
 
     def add_job[*_Ts](
         self, target: Callable[[*_Ts], Any] | Coroutine[Any, Any, Any], *args: *_Ts
