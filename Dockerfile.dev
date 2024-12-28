@@ -3,18 +3,17 @@ FROM mcr.microsoft.com/devcontainers/python:1-3.12
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Uninstall pre-installed formatting and linting tools
-# They would conflict with our pinned versions
 RUN \
     pipx uninstall pydocstyle \
     && pipx uninstall pycodestyle \
     && pipx uninstall mypy \
     && pipx uninstall pylint
 
+# Install additional system libraries
 RUN \
     curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add - \
     && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        # Additional library needed by some tests and accordingly by VScode Tests Discovery
         bluez \
         ffmpeg \
         libudev-dev \
@@ -66,6 +65,9 @@ WORKDIR /workspaces
 
 # Copy the source code
 COPY . /workspaces
+
+# Install Home Assistant in editable mode
+RUN uv pip install -e /workspaces
 
 # Expose the default Home Assistant port
 EXPOSE 8123

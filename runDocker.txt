@@ -1,0 +1,66 @@
+How to Set Up and Run Home Assisstant with Docker
+=====================================================
+
+(all the command after '*' need to be prompted into the vscode terminal)
+
+1. Clone the Home Assistant Core Repository
+
+    Purpose: Clones the Home Assistant core repository to your local machine.
+
+        * git clone https://github.com/home-assistant/core.git
+        * cd core
+
+2. Create the Configuration Directory
+
+    Purpose: Creates a config directory for Home Assistant configuration files.
+
+        * mkdir config
+
+3. Build the Docker Image
+
+    Purpose: Builds the Docker image using the Dockerfile.dev file.
+    
+        * docker build -f Dockerfile.dev -t homeassistant-dev .
+
+4. Start the Docker Container
+
+    Purpose: Runs the Docker container with the Home Assistant image and mounts your local directory.
+    Note: replace the '$(pwd)' with your core file directory if there is an error with the provided command.
+
+        * docker run -it --name homeassistant-dev -v "$(pwd):/workspaces" -p 8123:8123 homeassistant-dev
+
+5. Access Home Assistant
+
+    Open your browser and go to: http://localhost:8123.
+
+6. Making Live Code Changes (Two Methods)
+
+    Method 1: Manual Restart
+
+        a. After making code changes, restart the container:
+
+            * docker restart homeassistant-dev
+
+    Method 2: Attach VS Code to the Docker Container
+
+        a. Open VS Code, go to the Remote Explorer.
+        b. Attach to the homeassistant-dev container.
+        c. Activate the virtual environment:
+
+            * source /home/vscode/.local/ha-venv/bin/activate
+
+        d. Start Home Assistant:
+
+            * python3 -m homeassistant --config /workspaces/config
+
+7. Stop the Docker Container
+
+    Purpose: Stops the running Docker container.
+
+        * docker stop homeassistant-dev
+
+8. Remove the Docker Container
+
+    Purpose: Removes the Docker container after stopping it.
+
+        * docker rm homeassistant-dev
