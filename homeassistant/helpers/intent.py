@@ -491,7 +491,18 @@ def find_floors(
 
 
 def _normalize_name(name: str) -> str:
-    """Normalize name for comparison."""
+    """
+    Normalize a name for comparison.
+
+    Strips leading/trailing whitespace and converts the string to lowercase
+    to ensure consistent comparison of names.
+
+    Args:
+        name (str): The name or identifier to normalize.
+
+    Returns:
+        str: The normalized name.
+    """
     return name.strip().casefold()
 
 
@@ -499,11 +510,23 @@ def _filter_by_name(
     name: str,
     candidates: Iterable[MatchTargetsCandidate],
 ) -> Iterable[MatchTargetsCandidate]:
-    """Filter candidates by name."""
+    """
+    Filter candidates by their name or entity ID.
+
+    This function checks if the given name matches a candidate's entity ID, 
+    name, or aliases. Matching candidates are yielded as results.
+
+    Args:
+        name (str): The name or identifier to match against.
+        candidates (Iterable[MatchTargetsCandidate]): A list of candidates to filter.
+
+    Yields:
+        MatchTargetsCandidate: Candidates whose name or ID matches the given name.
+    """
     name_norm = _normalize_name(name)
 
     for candidate in candidates:
-        # Accept name or entity id
+        # Match against entity ID or normalized name
         if (candidate.state.entity_id == name) or _normalize_name(
             candidate.state.name
         ) == name_norm:
@@ -511,9 +534,11 @@ def _filter_by_name(
             yield candidate
             continue
 
+        # Skip if entity registry entry is not available
         if candidate.entity is None:
             continue
 
+        # Match against entity registry name
         if candidate.entity.name and (
             _normalize_name(candidate.entity.name) == name_norm
         ):
@@ -521,7 +546,7 @@ def _filter_by_name(
             yield candidate
             continue
 
-        # Check aliases
+        # Match against aliases
         if candidate.entity.aliases:
             for alias in candidate.entity.aliases:
                 if _normalize_name(alias) == name_norm:
@@ -595,17 +620,34 @@ def async_match_targets(  # noqa: C901
     preferences: MatchTargetsPreferences | None = None,
     states: list[State] | None = None,
 ) -> MatchTargetsResult:
-    """Match entities based on constraints in order to handle an intent."""
+    """
+    Match entities based on constraints to handle a user intent.
+
+    This function attempts to find entities that satisfy the provided 
+    constraints, such as names, domains, device classes, or states. 
+    It uses various filtering functions to narrow down candidates.
+
+    Args:
+        hass (HomeAssistant): The Home Assistant instance.
+        constraints (MatchTargetsConstraints): Criteria for matching entities.
+        preferences (MatchTargetsPreferences | None, optional): Preferences for disambiguating duplicates.
+        states (list[State] | None, optional): Pre-filtered states to match against. If None, all states are used.
+
+    Returns:
+        MatchTargetsResult: The result of the matching process, indicating 
+        whether a match was found and providing matched entities.
+    """
     preferences = preferences or MatchTargetsPreferences()
     filtered_by_domain = False
 
     if not states:
-        # Get all states and filter by domain
+        # Get all states filtered by domain if specified
         states = hass.states.async_all(constraints.domains)
         filtered_by_domain = True
         if not states:
             return MatchTargetsResult(False, MatchFailedReason.DOMAIN)
 
+    # Create initial list of candidates
     candidates = [
         MatchTargetsCandidate(
             state=state,
