@@ -199,15 +199,14 @@ async def async_handle(
     handler = hass.data.get(DATA_KEY, {}).get(intent_type)
 
     if handler is None:
-        raise UnknownIntent(f"Unknown intent {intent_type}")
+        _LOGGER.error(
+            "Unknown intent requested",
+            extra={"intent_type": intent_type, "slots": slots, "platform": platform},
+        )
+        raise UnknownIntent(intent_type)
 
-    # Create a default context if none is provided
-    if context is None:
-        context = Context()
-
-    # Use the default language if not specified
-    if language is None:
-        language = hass.config.language
+    context = context or Context()
+    language = language or hass.config.language
 
     # Construct the intent object with provided data
     intent = Intent(
@@ -224,34 +223,56 @@ async def async_handle(
     )
 
     try:
-        _LOGGER.info("Triggering intent handler %s", handler)
-        # Execute the handler for the intent
-        result = await handler.async_handle(intent)
+        _LOGGER.info(
+            "Handling intent",
+            extra={"intent_type": intent_type, "slots": slots, "platform": platform},
+        )
+        result = await handler.async_handle(intent)  # Execute the handler
+        return result  # Return the response from the handler
     except vol.Invalid as err:
-        # Log validation errors for slot data
-        _LOGGER.warning("Received invalid slot info for %s: %s", intent_type, err)
-        raise InvalidSlotInfo(f"Received invalid slot info for {intent_type}") from err
-    except IntentError:
-        raise  # Re-raise known intent-related errors
+        _LOGGER.warning(
+            "Invalid slot data for intent",
+            extra={"intent_type": intent_type, "slots": slots, "error": str(err)},
+        )
+        raise InvalidSlotInfo(intent_type) from err
+    except IntentError as err:
+        _LOGGER.error(
+            "Intent error encountered",
+            extra={
+                "intent_type": intent_type,
+                "error_code": err.code,
+                "error_message": str(err),
+            },
+        )
+        raise
     except Exception as err:
-        # Log unexpected errors during intent handling
-        _LOGGER.exception("Error handling %s", intent_type)
-        raise IntentUnexpectedError(f"Error handling {intent_type}") from err
-
-    # Return the handler's result
-    return result
+        _LOGGER.exception(
+            "Unexpected error while handling intent",
+            extra={"intent_type": intent_type, "slots": slots},
+        )
+        raise IntentUnexpectedError(intent_type, str(err)) from err
 
 
 class IntentError(HomeAssistantError):
-    """Base class for intent related errors."""
+    """Base class for intent-related errors."""
+
+    def __init__(self, message: str = "", code: str = "UNKNOWN_ERROR") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class UnknownIntent(IntentError):
-    """When the intent is not registered."""
+    """Raised when the intent is not registered."""
+
+    def __init__(self, intent_type: str) -> None:
+        super().__init__(f"Unknown intent: {intent_type}", code="UNKNOWN_INTENT")
 
 
 class InvalidSlotInfo(IntentError):
-    """When the slot data is invalid."""
+    """Raised when the slot data is invalid."""
+
+    def __init__(self, intent_type: str) -> None:
+        super().__init__(f"Invalid slot info for intent: {intent_type}", code="INVALID_SLOT_INFO")
 
 
 class IntentHandleError(IntentError):
@@ -264,7 +285,10 @@ class IntentHandleError(IntentError):
 
 
 class IntentUnexpectedError(IntentError):
-    """Unexpected error while handling intent."""
+    """Raised for unexpected errors during intent handling."""
+
+    def __init__(self, intent_type: str, details: str = "Unknown issue") -> None:
+        super().__init__(f"Unexpected error handling {intent_type}: {details}", code="UNEXPECTED_ERROR")
 
 
 class MatchFailedReason(Enum):
@@ -1236,10 +1260,16 @@ class DynamicServiceIntentHandler(IntentHandler):
     async def async_call_service(
         self, domain: str, service: str, intent_obj: Intent, state: State
     ) -> None:
-        """Call service on entity."""
-        hass = intent_obj.hass
+        """
+        Call a service on the specified entity.
 
+        Enhanced with detailed logging for success and error scenarios to improve
+        debugging and maintainability.
+        """
+        hass = intent_obj.hass
         service_data: dict[str, Any] = {ATTR_ENTITY_ID: state.entity_id}
+
+        # Add required slots to service data
         if self.required_slots:
             service_data.update(
                 {
@@ -1248,24 +1278,50 @@ class DynamicServiceIntentHandler(IntentHandler):
                 }
             )
 
+        # Add optional slots to service data
         if self.optional_slots:
             for key in self.optional_slots:
                 value = intent_obj.slots.get(key[0])
                 if value:
                     service_data[key[1]] = value["value"]
 
-        await self._run_then_background(
-            hass.async_create_task_internal(
-                hass.services.async_call(
-                    domain,
-                    service,
-                    service_data,
-                    context=intent_obj.context,
-                    blocking=True,
-                ),
-                f"intent_call_service_{domain}_{service}",
+        try:
+            _LOGGER.debug(
+                "Calling service",
+                extra={
+                    "domain": domain,
+                    "service": service,
+                    "service_data": service_data,
+                    "entity_id": state.entity_id,
+                },
             )
-        )
+
+            await hass.services.async_call(
+                domain,
+                service,
+                service_data,
+                context=intent_obj.context,
+                blocking=True,
+            )
+            _LOGGER.info(
+                "Service call successful",
+                extra={
+                    "domain": domain,
+                    "service": service,
+                    "entity_id": state.entity_id,
+                },
+            )
+        except Exception as err:
+            _LOGGER.error(
+                "Service call failed",
+                extra={
+                    "domain": domain,
+                    "service": service,
+                    "entity_id": state.entity_id,
+                    "error": str(err),
+                },
+            )
+            raise IntentHandleError(f"Failed to call {service} for {state.entity_id}") from err
 
     async def _run_then_background(self, task: asyncio.Task[Any]) -> None:
         """Run task with timeout to (hopefully) catch validation errors.
@@ -1409,16 +1465,22 @@ class IntentResponseErrorCode(str, Enum):
     """Reason for an intent response error."""
 
     NO_INTENT_MATCH = "no_intent_match"
-    """Text could not be matched to an intent"""
+    """Text could not be matched to an intent."""
 
-    NO_VALID_TARGETS = "no_valid_targets"
-    """Intent was matched, but no valid areas/devices/entities were targeted"""
+    VALIDATION_ERROR = "validation_error"
+    """Slot validation failed."""
+
+    SERVICE_UNAVAILABLE = "service_unavailable"
+    """Service was unavailable."""
+
+    TIMEOUT = "timeout"
+    """Operation timed out."""
 
     FAILED_TO_HANDLE = "failed_to_handle"
-    """Unexpected error occurred while handling intent"""
+    """Unexpected error occurred while handling intent."""
 
     UNKNOWN = "unknown"
-    """Error outside the scope of intent processing"""
+    """Error outside the scope of intent processing."""
 
 
 class IntentResponseTargetType(str, Enum):
