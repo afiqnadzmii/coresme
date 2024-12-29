@@ -1,4 +1,31 @@
-"""Module to coordinate user intentions."""
+"""
+Intent Module for Home Assistant.
+
+This module provides a robust framework to handle user intents within Home Assistant. 
+It supports registering, removing, and handling intents, which are specific commands 
+or requests issued by users through various interfaces like voice assistants or UI.
+
+Key Features:
+- **Intent Registration**: Register and manage intent handlers.
+- **Intent Handling**: Handle user requests using the appropriate intent handlers.
+- **Target Matching**: Match user commands to specific entities, areas, or devices.
+- **Error Handling**: Provide feedback when intents fail due to invalid slots or unknown intents.
+
+Main Classes:
+- `Intent`: Represents an intent request.
+- `IntentHandler`: Abstract base class for custom intent handlers.
+- `ServiceIntentHandler`: Handles service-specific intents.
+- `DynamicServiceIntentHandler`: Dynamically maps intents to services.
+- `IntentResponse`: Manages the response of an intent, including speech, targets, and results.
+
+Main Functions:
+- `async_register`: Register a new intent handler.
+- `async_remove`: Remove an intent handler.
+- `async_handle`: Process and execute an intent.
+
+This module ensures extensibility by allowing developers to add custom intents and maintain 
+a consistent interface for handling commands across various platforms.
+"""
 
 from __future__ import annotations
 
@@ -69,28 +96,56 @@ SPEECH_TYPE_SSML = "ssml"
 @callback
 @bind_hass
 def async_register(hass: HomeAssistant, handler: IntentHandler) -> None:
-    """Register an intent with Home Assistant."""
+    """
+    Register a new intent handler with Home Assistant.
+
+    This function allows developers to define custom intent handlers for 
+    specific commands or requests. If a handler for the same intent type
+    already exists, it will be overwritten with a warning.
+
+    Args:
+        hass (HomeAssistant): The Home Assistant instance.
+        handler (IntentHandler): The intent handler to register.
+
+    Raises:
+        AssertionError: If the `intent_type` attribute is not set in the handler.
+    """
+    # Initialize intent registry if not already created
     if (intents := hass.data.get(DATA_KEY)) is None:
         intents = {}
         hass.data[DATA_KEY] = intents
 
+    # Ensure the handler has a valid intent type
     assert getattr(handler, "intent_type", None), "intent_type should be set"
 
+    # Log a warning if overwriting an existing intent handler
     if handler.intent_type in intents:
         _LOGGER.warning(
             "Intent %s is being overwritten by %s", handler.intent_type, handler
         )
 
+    # Add the handler to the registry
     intents[handler.intent_type] = handler
 
 
 @callback
 @bind_hass
 def async_remove(hass: HomeAssistant, intent_type: str) -> None:
-    """Remove an intent from Home Assistant."""
+    """
+    Remove an intent handler from Home Assistant.
+
+    This function unregisters an intent handler, ensuring that the specified 
+    intent type is no longer handled.
+
+    Args:
+        hass (HomeAssistant): The Home Assistant instance.
+        intent_type (str): The type of intent to remove.
+    """
+    # Check if the intent registry exists; if not, exit early
     if (intents := hass.data.get(DATA_KEY)) is None:
         return
 
+    # Remove the specified intent type from the registry
     intents.pop(intent_type, None)
 
 
@@ -113,18 +168,48 @@ async def async_handle(
     device_id: str | None = None,
     conversation_agent_id: str | None = None,
 ) -> IntentResponse:
-    """Handle an intent."""
+    """
+    Handle an intent issued by a user.
+
+    This function processes the given intent by matching it with the appropriate 
+    registered intent handler and executing the corresponding logic. It also validates 
+    the intent slots and manages any errors encountered during handling.
+
+    Args:
+        hass (HomeAssistant): The Home Assistant instance.
+        platform (str): The platform from which the intent originated.
+        intent_type (str): The type of intent to handle.
+        slots (_SlotsType | None, optional): Data slots associated with the intent.
+        text_input (str | None, optional): Raw text input from the user.
+        context (Context | None, optional): Context of the intent (e.g., user info).
+        language (str | None, optional): Language for processing the intent.
+        assistant (str | None, optional): The assistant processing the intent.
+        device_id (str | None, optional): ID of the originating device.
+        conversation_agent_id (str | None, optional): ID of the conversation agent.
+
+    Returns:
+        IntentResponse: The response generated after processing the intent.
+
+    Raises:
+        UnknownIntent: If no handler is registered for the specified intent type.
+        InvalidSlotInfo: If the slot data is invalid.
+        IntentUnexpectedError: If an unexpected error occurs during handling.
+    """
+    # Retrieve the appropriate intent handler from the registry
     handler = hass.data.get(DATA_KEY, {}).get(intent_type)
 
     if handler is None:
         raise UnknownIntent(f"Unknown intent {intent_type}")
 
+    # Create a default context if none is provided
     if context is None:
         context = Context()
 
+    # Use the default language if not specified
     if language is None:
         language = hass.config.language
 
+    # Construct the intent object with provided data
     intent = Intent(
         hass,
         platform=platform,
@@ -140,15 +225,20 @@ async def async_handle(
 
     try:
         _LOGGER.info("Triggering intent handler %s", handler)
+        # Execute the handler for the intent
         result = await handler.async_handle(intent)
     except vol.Invalid as err:
+        # Log validation errors for slot data
         _LOGGER.warning("Received invalid slot info for %s: %s", intent_type, err)
         raise InvalidSlotInfo(f"Received invalid slot info for {intent_type}") from err
     except IntentError:
-        raise  # bubble up intent related errors
+        raise  # Re-raise known intent-related errors
     except Exception as err:
+        # Log unexpected errors during intent handling
         _LOGGER.exception("Error handling %s", intent_type)
         raise IntentUnexpectedError(f"Error handling {intent_type}") from err
+
+    # Return the handler's result
     return result
 
 
@@ -762,7 +852,18 @@ def async_test_feature(state: State, feature: int, feature_name: str) -> None:
 
 
 class IntentHandler:
-    """Intent handler registration."""
+    """
+    Base class for defining custom intent handlers.
+
+    This class provides a framework for handling specific types of intents by 
+    implementing the `async_handle` method. It also allows validating and 
+    processing intent slots to ensure the integrity of the input data.
+
+    Attributes:
+        intent_type (str): The type of intent handled by this class.
+        platforms (set[str] | None): Platforms supported by the handler.
+        description (str | None): Description of the intent.
+    """
 
     intent_type: str
     platforms: set[str] | None = None
