@@ -1,4 +1,31 @@
-"""Module to coordinate user intentions."""
+"""
+Intent Module for Home Assistant.
+
+This module provides a robust framework to handle user intents within Home Assistant. 
+It supports registering, removing, and handling intents, which are specific commands 
+or requests issued by users through various interfaces like voice assistants or UI.
+
+Key Features:
+- **Intent Registration**: Register and manage intent handlers.
+- **Intent Handling**: Handle user requests using the appropriate intent handlers.
+- **Target Matching**: Match user commands to specific entities, areas, or devices.
+- **Error Handling**: Provide feedback when intents fail due to invalid slots or unknown intents.
+
+Main Classes:
+- `Intent`: Represents an intent request.
+- `IntentHandler`: Abstract base class for custom intent handlers.
+- `ServiceIntentHandler`: Handles service-specific intents.
+- `DynamicServiceIntentHandler`: Dynamically maps intents to services.
+- `IntentResponse`: Manages the response of an intent, including speech, targets, and results.
+
+Main Functions:
+- `async_register`: Register a new intent handler.
+- `async_remove`: Remove an intent handler.
+- `async_handle`: Process and execute an intent.
+
+This module ensures extensibility by allowing developers to add custom intents and maintain 
+a consistent interface for handling commands across various platforms.
+"""
 
 from __future__ import annotations
 
@@ -69,28 +96,56 @@ SPEECH_TYPE_SSML = "ssml"
 @callback
 @bind_hass
 def async_register(hass: HomeAssistant, handler: IntentHandler) -> None:
-    """Register an intent with Home Assistant."""
+    """
+    Register a new intent handler with Home Assistant.
+
+    This function allows developers to define custom intent handlers for 
+    specific commands or requests. If a handler for the same intent type
+    already exists, it will be overwritten with a warning.
+
+    Args:
+        hass (HomeAssistant): The Home Assistant instance.
+        handler (IntentHandler): The intent handler to register.
+
+    Raises:
+        AssertionError: If the `intent_type` attribute is not set in the handler.
+    """
+    # Initialize intent registry if not already created
     if (intents := hass.data.get(DATA_KEY)) is None:
         intents = {}
         hass.data[DATA_KEY] = intents
 
+    # Ensure the handler has a valid intent type
     assert getattr(handler, "intent_type", None), "intent_type should be set"
 
+    # Log a warning if overwriting an existing intent handler
     if handler.intent_type in intents:
         _LOGGER.warning(
             "Intent %s is being overwritten by %s", handler.intent_type, handler
         )
 
+    # Add the handler to the registry
     intents[handler.intent_type] = handler
 
 
 @callback
 @bind_hass
 def async_remove(hass: HomeAssistant, intent_type: str) -> None:
-    """Remove an intent from Home Assistant."""
+    """
+    Remove an intent handler from Home Assistant.
+
+    This function unregisters an intent handler, ensuring that the specified 
+    intent type is no longer handled.
+
+    Args:
+        hass (HomeAssistant): The Home Assistant instance.
+        intent_type (str): The type of intent to remove.
+    """
+    # Check if the intent registry exists; if not, exit early
     if (intents := hass.data.get(DATA_KEY)) is None:
         return
 
+    # Remove the specified intent type from the registry
     intents.pop(intent_type, None)
 
 
@@ -113,18 +168,47 @@ async def async_handle(
     device_id: str | None = None,
     conversation_agent_id: str | None = None,
 ) -> IntentResponse:
-    """Handle an intent."""
+    """
+    Handle an intent issued by a user.
+
+    This function processes the given intent by matching it with the appropriate 
+    registered intent handler and executing the corresponding logic. It also validates 
+    the intent slots and manages any errors encountered during handling.
+
+    Args:
+        hass (HomeAssistant): The Home Assistant instance.
+        platform (str): The platform from which the intent originated.
+        intent_type (str): The type of intent to handle.
+        slots (_SlotsType | None, optional): Data slots associated with the intent.
+        text_input (str | None, optional): Raw text input from the user.
+        context (Context | None, optional): Context of the intent (e.g., user info).
+        language (str | None, optional): Language for processing the intent.
+        assistant (str | None, optional): The assistant processing the intent.
+        device_id (str | None, optional): ID of the originating device.
+        conversation_agent_id (str | None, optional): ID of the conversation agent.
+
+    Returns:
+        IntentResponse: The response generated after processing the intent.
+
+    Raises:
+        UnknownIntent: If no handler is registered for the specified intent type.
+        InvalidSlotInfo: If the slot data is invalid.
+        IntentUnexpectedError: If an unexpected error occurs during handling.
+    """
+    # Retrieve the appropriate intent handler from the registry
     handler = hass.data.get(DATA_KEY, {}).get(intent_type)
 
     if handler is None:
-        raise UnknownIntent(f"Unknown intent {intent_type}")
+        _LOGGER.error(
+            "Unknown intent requested",
+            extra={"intent_type": intent_type, "slots": slots, "platform": platform},
+        )
+        raise UnknownIntent(intent_type)
 
-    if context is None:
-        context = Context()
+    context = context or Context()
+    language = language or hass.config.language
 
-    if language is None:
-        language = hass.config.language
-
+    # Construct the intent object with provided data
     intent = Intent(
         hass,
         platform=platform,
@@ -139,29 +223,56 @@ async def async_handle(
     )
 
     try:
-        _LOGGER.info("Triggering intent handler %s", handler)
-        result = await handler.async_handle(intent)
+        _LOGGER.info(
+            "Handling intent",
+            extra={"intent_type": intent_type, "slots": slots, "platform": platform},
+        )
+        result = await handler.async_handle(intent)  # Execute the handler
+        return result  # Return the response from the handler
     except vol.Invalid as err:
-        _LOGGER.warning("Received invalid slot info for %s: %s", intent_type, err)
-        raise InvalidSlotInfo(f"Received invalid slot info for {intent_type}") from err
-    except IntentError:
-        raise  # bubble up intent related errors
+        _LOGGER.warning(
+            "Invalid slot data for intent",
+            extra={"intent_type": intent_type, "slots": slots, "error": str(err)},
+        )
+        raise InvalidSlotInfo(intent_type) from err
+    except IntentError as err:
+        _LOGGER.error(
+            "Intent error encountered",
+            extra={
+                "intent_type": intent_type,
+                "error_code": err.code,
+                "error_message": str(err),
+            },
+        )
+        raise
     except Exception as err:
-        _LOGGER.exception("Error handling %s", intent_type)
-        raise IntentUnexpectedError(f"Error handling {intent_type}") from err
-    return result
+        _LOGGER.exception(
+            "Unexpected error while handling intent",
+            extra={"intent_type": intent_type, "slots": slots},
+        )
+        raise IntentUnexpectedError(intent_type, str(err)) from err
 
 
 class IntentError(HomeAssistantError):
-    """Base class for intent related errors."""
+    """Base class for intent-related errors."""
+
+    def __init__(self, message: str = "", code: str = "UNKNOWN_ERROR") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class UnknownIntent(IntentError):
-    """When the intent is not registered."""
+    """Raised when the intent is not registered."""
+
+    def __init__(self, intent_type: str) -> None:
+        super().__init__(f"Unknown intent: {intent_type}", code="UNKNOWN_INTENT")
 
 
 class InvalidSlotInfo(IntentError):
-    """When the slot data is invalid."""
+    """Raised when the slot data is invalid."""
+
+    def __init__(self, intent_type: str) -> None:
+        super().__init__(f"Invalid slot info for intent: {intent_type}", code="INVALID_SLOT_INFO")
 
 
 class IntentHandleError(IntentError):
@@ -174,7 +285,10 @@ class IntentHandleError(IntentError):
 
 
 class IntentUnexpectedError(IntentError):
-    """Unexpected error while handling intent."""
+    """Raised for unexpected errors during intent handling."""
+
+    def __init__(self, intent_type: str, details: str = "Unknown issue") -> None:
+        super().__init__(f"Unexpected error handling {intent_type}: {details}", code="UNEXPECTED_ERROR")
 
 
 class MatchFailedReason(Enum):
@@ -401,7 +515,18 @@ def find_floors(
 
 
 def _normalize_name(name: str) -> str:
-    """Normalize name for comparison."""
+    """
+    Normalize a name for comparison.
+
+    Strips leading/trailing whitespace and converts the string to lowercase
+    to ensure consistent comparison of names.
+
+    Args:
+        name (str): The name or identifier to normalize.
+
+    Returns:
+        str: The normalized name.
+    """
     return name.strip().casefold()
 
 
@@ -409,11 +534,23 @@ def _filter_by_name(
     name: str,
     candidates: Iterable[MatchTargetsCandidate],
 ) -> Iterable[MatchTargetsCandidate]:
-    """Filter candidates by name."""
+    """
+    Filter candidates by their name or entity ID.
+
+    This function checks if the given name matches a candidate's entity ID, 
+    name, or aliases. Matching candidates are yielded as results.
+
+    Args:
+        name (str): The name or identifier to match against.
+        candidates (Iterable[MatchTargetsCandidate]): A list of candidates to filter.
+
+    Yields:
+        MatchTargetsCandidate: Candidates whose name or ID matches the given name.
+    """
     name_norm = _normalize_name(name)
 
     for candidate in candidates:
-        # Accept name or entity id
+        # Match against entity ID or normalized name
         if (candidate.state.entity_id == name) or _normalize_name(
             candidate.state.name
         ) == name_norm:
@@ -421,9 +558,11 @@ def _filter_by_name(
             yield candidate
             continue
 
+        # Skip if entity registry entry is not available
         if candidate.entity is None:
             continue
 
+        # Match against entity registry name
         if candidate.entity.name and (
             _normalize_name(candidate.entity.name) == name_norm
         ):
@@ -431,7 +570,7 @@ def _filter_by_name(
             yield candidate
             continue
 
-        # Check aliases
+        # Match against aliases
         if candidate.entity.aliases:
             for alias in candidate.entity.aliases:
                 if _normalize_name(alias) == name_norm:
@@ -505,17 +644,34 @@ def async_match_targets(  # noqa: C901
     preferences: MatchTargetsPreferences | None = None,
     states: list[State] | None = None,
 ) -> MatchTargetsResult:
-    """Match entities based on constraints in order to handle an intent."""
+    """
+    Match entities based on constraints to handle a user intent.
+
+    This function attempts to find entities that satisfy the provided 
+    constraints, such as names, domains, device classes, or states. 
+    It uses various filtering functions to narrow down candidates.
+
+    Args:
+        hass (HomeAssistant): The Home Assistant instance.
+        constraints (MatchTargetsConstraints): Criteria for matching entities.
+        preferences (MatchTargetsPreferences | None, optional): Preferences for disambiguating duplicates.
+        states (list[State] | None, optional): Pre-filtered states to match against. If None, all states are used.
+
+    Returns:
+        MatchTargetsResult: The result of the matching process, indicating 
+        whether a match was found and providing matched entities.
+    """
     preferences = preferences or MatchTargetsPreferences()
     filtered_by_domain = False
 
     if not states:
-        # Get all states and filter by domain
+        # Get all states filtered by domain if specified
         states = hass.states.async_all(constraints.domains)
         filtered_by_domain = True
         if not states:
             return MatchTargetsResult(False, MatchFailedReason.DOMAIN)
 
+    # Create initial list of candidates
     candidates = [
         MatchTargetsCandidate(
             state=state,
@@ -762,7 +918,18 @@ def async_test_feature(state: State, feature: int, feature_name: str) -> None:
 
 
 class IntentHandler:
-    """Intent handler registration."""
+    """
+    Base class for defining custom intent handlers.
+
+    This class provides a framework for handling specific types of intents by 
+    implementing the `async_handle` method. It also allows validating and 
+    processing intent slots to ensure the integrity of the input data.
+
+    Attributes:
+        intent_type (str): The type of intent handled by this class.
+        platforms (set[str] | None): Platforms supported by the handler.
+        description (str | None): Description of the intent.
+    """
 
     intent_type: str
     platforms: set[str] | None = None
@@ -1093,10 +1260,16 @@ class DynamicServiceIntentHandler(IntentHandler):
     async def async_call_service(
         self, domain: str, service: str, intent_obj: Intent, state: State
     ) -> None:
-        """Call service on entity."""
-        hass = intent_obj.hass
+        """
+        Call a service on the specified entity.
 
+        Enhanced with detailed logging for success and error scenarios to improve
+        debugging and maintainability.
+        """
+        hass = intent_obj.hass
         service_data: dict[str, Any] = {ATTR_ENTITY_ID: state.entity_id}
+
+        # Add required slots to service data
         if self.required_slots:
             service_data.update(
                 {
@@ -1105,24 +1278,50 @@ class DynamicServiceIntentHandler(IntentHandler):
                 }
             )
 
+        # Add optional slots to service data
         if self.optional_slots:
             for key in self.optional_slots:
                 value = intent_obj.slots.get(key[0])
                 if value:
                     service_data[key[1]] = value["value"]
 
-        await self._run_then_background(
-            hass.async_create_task_internal(
-                hass.services.async_call(
-                    domain,
-                    service,
-                    service_data,
-                    context=intent_obj.context,
-                    blocking=True,
-                ),
-                f"intent_call_service_{domain}_{service}",
+        try:
+            _LOGGER.debug(
+                "Calling service",
+                extra={
+                    "domain": domain,
+                    "service": service,
+                    "service_data": service_data,
+                    "entity_id": state.entity_id,
+                },
             )
-        )
+
+            await hass.services.async_call(
+                domain,
+                service,
+                service_data,
+                context=intent_obj.context,
+                blocking=True,
+            )
+            _LOGGER.info(
+                "Service call successful",
+                extra={
+                    "domain": domain,
+                    "service": service,
+                    "entity_id": state.entity_id,
+                },
+            )
+        except Exception as err:
+            _LOGGER.error(
+                "Service call failed",
+                extra={
+                    "domain": domain,
+                    "service": service,
+                    "entity_id": state.entity_id,
+                    "error": str(err),
+                },
+            )
+            raise IntentHandleError(f"Failed to call {service} for {state.entity_id}") from err
 
     async def _run_then_background(self, task: asyncio.Task[Any]) -> None:
         """Run task with timeout to (hopefully) catch validation errors.
@@ -1266,16 +1465,22 @@ class IntentResponseErrorCode(str, Enum):
     """Reason for an intent response error."""
 
     NO_INTENT_MATCH = "no_intent_match"
-    """Text could not be matched to an intent"""
+    """Text could not be matched to an intent."""
 
-    NO_VALID_TARGETS = "no_valid_targets"
-    """Intent was matched, but no valid areas/devices/entities were targeted"""
+    VALIDATION_ERROR = "validation_error"
+    """Slot validation failed."""
+
+    SERVICE_UNAVAILABLE = "service_unavailable"
+    """Service was unavailable."""
+
+    TIMEOUT = "timeout"
+    """Operation timed out."""
 
     FAILED_TO_HANDLE = "failed_to_handle"
-    """Unexpected error occurred while handling intent"""
+    """Unexpected error occurred while handling intent."""
 
     UNKNOWN = "unknown"
-    """Error outside the scope of intent processing"""
+    """Error outside the scope of intent processing."""
 
 
 class IntentResponseTargetType(str, Enum):
